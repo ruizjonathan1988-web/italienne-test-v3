@@ -960,8 +960,13 @@ body.has-tabs .play-header{padding:.35rem .68rem}
   </button>
 </div>
 
+<!-- BARRE TIMER MIC -->
+<div id="mic-timer-bar" style="display:none;position:fixed;top:0;left:0;right:0;height:4px;z-index:130;background:var(--line-l)">
+  <div id="mic-timer-fill" style="height:100%;background:var(--amber);width:100%;border-radius:0 2px 2px 0"></div>
+</div>
+
 <!-- FAB PLAY -->
-<div class="fab-play" id="fab-play" onclick="togglePlay()">▶</div>
+<div class="fab-play" id="fab-play" onclick="onFabTap()">▶</div>
  <div class="mic-overlay" id="mic-overlay">
   <div class="mic-prompt" id="mic-prompt">À toi de parler…</div>
   <div class="mic-circle">🎤</div>
@@ -2291,6 +2296,8 @@ function navScene(delta){
   }
 }
 function _nav(){
+  // Timer mic : arrêter l'ancien, relancer si c'est toujours ma réplique
+  _stopMicTimer();
   if(S.mode==='karaoke')renderKaraoke();
   else{highlightCurrent();scrollToCur();updateScrubberCursor();}
   updateProg();updateSceneHighlight();
@@ -2298,6 +2305,12 @@ function _nav(){
   savePos();
   updatePrevContext();
   renderScenePips();
+  // Relancer le timer si on revient sur une réplique "mon tour en attente"
+  const _navCur = S.dialogues[S.lineIdx];
+  if(S._myTurnPending && !S.isPlaying && MIC_MODES_OK.includes(S.mode) && _navCur && isMyLine(_navCur.role)){
+    _startMicTimer();
+  }
+  updateFabPlay();
 }
 function scrollToCur(){requestAnimationFrame(()=>{const el=$('sl-'+S.lineIdx);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});});}
 function highlightCurrent(){document.querySelectorAll('.s-line').forEach(el=>el.classList.toggle('current',parseInt(el.dataset.di)===S.lineIdx));}
@@ -2509,7 +2522,7 @@ function togglePlay(){
 
   // Cas "mon tour en attente" (skip ou before) : ▶ avance à la réplique suivante et continue
   if(S._myTurnPending){
-    S._myTurnPending=false;resetHeader();clearSouffleur();clearAutoChainCountdown();
+    S._myTurnPending=false;resetHeader();clearSouffleur();clearAutoChainCountdown();_stopMicTimer();
     _advanceAndPlay();
     return;
   }
@@ -2537,7 +2550,7 @@ function startPlay(){
 }
 function stopAll(){
   S.isPlaying=false;
-  TTS.stop();clearSouffleur();clearAutoChainCountdown();
+  TTS.stop();clearSouffleur();clearAutoChainCountdown();_stopMicTimer();
   const bp=$('bb-play');if(bp){bp.classList.remove('active');bp.textContent='▶';}
   resetHeader();
   updateFabPlay();
@@ -2606,10 +2619,18 @@ function _pauseMyTurn(afterPending,msg){
   const bp=$('bb-play');if(bp){bp.classList.remove('active');bp.textContent='▶';}
   S._myTurnPending=true;
   S._afterPending=!!afterPending;
+  updateFabPlay();
   setHeaderMyTurn(msg);
   if(S.mode==='souffleur')startSouffleur();
-  // Auto-enchaîner si activé
-  if(S.autoChain){
+  // Lancer le timer micro si mode micro actif (prend le dessus sur l'auto-chain)
+  const _pmCur=S.dialogues[S.lineIdx];
+  const _micActive = MIC_MODES_OK.includes(S.mode) && _pmCur && isMyLine(_pmCur.role) && micEnabled();
+  if(_micActive){
+    _startMicTimer();
+    updateFabPlay();
+  }
+  // Auto-enchaîner si activé ET micro non actif
+  if(S.autoChain && !_micActive){
     startAutoChainCountdown(()=>{
       if(!S._myTurnPending)return; // déjà géré
       if(S._afterPending){
@@ -4702,9 +4723,98 @@ function switchTab(tab){
 function updateFabPlay(){
   const fab=$('fab-play');
   if(!fab) return;
-  fab.classList.toggle('playing', S.isPlaying);
-  fab.textContent = S.isPlaying ? '⏸' : '▶';
+  const isMyTurn = S._myTurnPending && !S.isPlaying;
+  const cur = S.dialogues[S.lineIdx];
+  const isMicMode = MIC_MODES_OK.includes(S.mode);
+  if(isMyTurn && isMicMode && cur && isMyLine(cur.role)){
+    if(_micTimerExpired){
+      // Barre écoulée sans appui → bouton suivant
+      fab.textContent = '⏭';
+      fab.style.background = 'var(--ink-2)';
+      fab.classList.remove('playing');
+    } else {
+      // Timer en cours → bouton micro
+      fab.textContent = '🎤';
+      fab.style.background = 'var(--red)';
+      fab.classList.remove('playing');
+    }
+  } else {
+    fab.textContent = S.isPlaying ? '⏸' : '▶';
+    fab.style.background = '';
+    fab.classList.toggle('playing', S.isPlaying);
+  }
 }
+
+function onFabTap(){
+  const cur = S.dialogues[S.lineIdx];
+  const isMyTurn = S._myTurnPending && !S.isPlaying;
+  const isMicMode = MIC_MODES_OK.includes(S.mode);
+  if(isMyTurn && isMicMode && cur && isMyLine(cur.role)){
+    if(_micTimerExpired){
+      // Bouton suivant : passer à la réplique suivante
+      _micTimerExpired = false;
+      S._myTurnPending = false;
+      S._afterPending = false;
+      resetHeader(); clearSouffleur();
+      _advanceAndPlay();
+    } else {
+      // Bouton micro : lancer l'écoute
+      _stopMicTimer();
+      startMicEval(S.lineIdx);
+    }
+  } else {
+    togglePlay();
+  }
+}
+
+let _micTimerT = null;
+
+function _startMicTimer(){
+  _stopMicTimer();
+  if(!micEnabled()) return;
+  const cur = S.dialogues[S.lineIdx];
+  if(!cur) return;
+  const words = cur.text.split(/\s+/).filter(Boolean).length;
+  const speedMult = parseFloat($('autochain-delay')?.value || 1);
+  const dur = Math.max(2000, Math.min(45000, (words * 600) / speedMult));
+  const bar = $('mic-timer-bar');
+  const fill = $('mic-timer-fill');
+  if(!bar || !fill) return;
+  bar.style.display = 'block';
+  fill.style.transition = 'none';
+  fill.style.width = '100%';
+  fill.style.background = 'var(--amber)';
+  requestAnimationFrame(()=>{
+    fill.style.transition = 'width ' + dur + 'ms linear';
+    fill.style.width = '0%';
+  });
+  _micTimerT = setTimeout(()=>{
+    _stopMicTimer();
+    if(!S._myTurnPending) return;
+    if(micAutoAdvance()){
+      // Avance auto
+      S._myTurnPending = false;
+      S._afterPending = false;
+      resetHeader(); clearSouffleur();
+      _advanceAndPlay();
+    } else {
+      // Barre finie, pas d'avance auto : FAB devient › (suivant)
+      _micTimerExpired = true;
+      updateFabPlay();
+    }
+  }, dur);
+}
+
+function _stopMicTimer(){
+  clearTimeout(_micTimerT);
+  _micTimerExpired = false;
+  const bar = $('mic-timer-bar');
+  const fill = $('mic-timer-fill');
+  if(bar) bar.style.display = 'none';
+  if(fill){ fill.style.transition = 'none'; fill.style.width = '100%'; }
+}
+
+let _micTimerExpired = false;
 
 // ════ COUCHE CHOIX RÔLE ════
 function showRoleLayer(){
@@ -5044,6 +5154,42 @@ function renderSettingsTab(tab){
           style="width:100%;accent-color:var(--red)">
       </div>`:''}
 
+      <div class="settings-section-label">🎤 Évaluation vocale</div>
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Mode micro</div>
+          <div class="settings-row-sub">Manuel : tu appuies sur 🎤 toi-même.</div>
+        </div>
+        <div class="segment" style="min-width:120px">
+        <div class="seg-opt ${micMode()==='off'?'active':''}" onclick="localStorage.setItem('it.mic_mode','off');renderSettingsTab('session')">Off</div>
+          <div class="seg-opt ${micMode()==='manuel'?'active':''}" onclick="localStorage.setItem('it.mic_mode','manuel');renderSettingsTab('session')">Manuel</div>
+        </div>
+      </div>
+      <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:.3rem">
+        <div style="display:flex;justify-content:space-between;width:100%">
+          <div class="settings-row-label">Seuil de réussite</div>
+          <span id="mic-threshold-val" style="font-family:'Courier Prime',monospace;font-size:.75rem;color:var(--amber)">${micThreshold()}%</span>
+        </div>
+        <div class="settings-row-sub">En dessous de ce score, un bouton Réessayer apparaît.</div>
+        <input type="range" min="40" max="95" step="5" value="${micThreshold()}"
+          oninput="localStorage.setItem('it.mic_threshold',this.value);$('mic-threshold-val').textContent=this.value+'%'"
+          style="width:100%;accent-color:var(--red)">
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Avancer automatiquement</div>
+          <div class="settings-row-sub">Passe à la suite si le score dépasse le seuil.</div>
+        </div>
+        <div class="sw ${micAutoAdvance()?'on':'off'}" onclick="localStorage.setItem('it.mic_advance',localStorage.getItem('it.mic_advance')==='1'?'0':'1');renderSettingsTab('session')"></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Sons de feedback</div>
+          <div class="settings-row-sub">Bip sonore selon le résultat.</div>
+        </div>
+        <div class="sw ${micSounds()?'on':'off'}" onclick="localStorage.setItem('it.mic_sounds',localStorage.getItem('it.mic_sounds')==='0'?'1':'0');renderSettingsTab('session')"></div>
+      </div>
+
       <div class="settings-section-label">Outils de répétition</div>
       <div class="tools-grid">
         <div class="tool-chip" onclick="openEnregistrements()">🎙️ Enregistrements</div>
@@ -5118,6 +5264,29 @@ function renderSettingsTab(tab){
       </div>
       <button class="btn" style="font-size:.65rem;padding:.22rem;width:100%;margin-bottom:.4rem" onclick="testCache()">🔍 Tester le cache GitHub</button>
       <div id="cache-gh-status2" style="font-family:'Courier Prime',monospace;font-size:.6rem;line-height:1.5"></div>
+
+      <div class="settings-section-label">Hugging Face (scoring sémantique)</div>
+      <div style="font-family:'Courier Prime',monospace;font-size:.63rem;color:var(--ink-3);margin-bottom:.35rem;line-height:1.6">
+        Clé optionnelle pour améliorer le scoring micro en zone grise (40–85%).<br>
+        Gratuit sur <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--amber)">huggingface.co</a>
+      </div>
+      <input type="password" id="hf-key-input" class="txt-input"
+        placeholder="hf_…"
+        value="${getHFKey()}"
+        style="font-size:.72rem;padding:.3rem .5rem;margin-bottom:.4rem">
+      <div style="display:flex;gap:.35rem;margin-bottom:.4rem">
+        <button class="btn primary" style="flex:1;font-size:.68rem;padding:.28rem"
+          onclick="const v=$('hf-key-input')?.value?.trim();if(v){localStorage.setItem('it.hf_key',v);toast('✓ Clé Hugging Face sauvegardée');}else{localStorage.removeItem('it.hf_key');toast('Clé supprimée');}">
+          ✓ Sauvegarder
+        </button>
+        <button class="btn" style="font-size:.68rem;padding:.28rem"
+          onclick="localStorage.removeItem('it.hf_key');if($('hf-key-input'))$('hf-key-input').value='';toast('Clé supprimée');">
+          🗑
+        </button>
+      </div>
+      <div style="font-family:'Courier Prime',monospace;font-size:.6rem;color:${getHFKey()?'var(--green)':'var(--ink-4)'}">
+        ${getHFKey()?'✓ Clé présente — scoring sémantique activé':'Aucune clé — scoring par mots-clés uniquement'}
+      </div>
 
       <div class="settings-section-label">Voix par personnage</div>
       <div id="voice-assign-list2"></div>
