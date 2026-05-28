@@ -710,6 +710,33 @@ body.dark-mode .souffleur-hint{background:#2A2420}
 .play-header .icon-btn:nth-child(2){display:none}
 .play-header .mode-badge{display:none}
 body.has-tabs .play-header{padding:.35rem .68rem}
+
+  /* ── ÉVALUATION VOCALE ── */
+.mic-overlay{display:none;position:fixed;left:0;right:0;bottom:0;z-index:120;background:var(--ink);padding:1rem 1.2rem 1.4rem;border-top:2px solid var(--ink-2);flex-direction:column;align-items:center;gap:.7rem;animation:slideUp .25s ease}
+.mic-overlay.show{display:flex}
+.mic-prompt{font-family:'IM Fell English',serif;font-style:italic;font-size:1.05rem;color:rgba(244,238,228,.75)}
+.mic-circle{width:58px;height:58px;border-radius:50%;background:var(--red);border:2px solid var(--paper);display:flex;align-items:center;justify-content:center;font-size:1.5rem;animation:micRipple 1s infinite}
+@keyframes micRipple{0%{box-shadow:0 0 0 0 rgba(138,24,24,.5)}100%{box-shadow:0 0 0 14px rgba(138,24,24,0)}}
+.mic-wave{display:flex;align-items:center;gap:3px;height:24px}
+.mic-wave span{width:3px;border-radius:2px;background:var(--amber);animation:micW .6s ease-in-out infinite}
+.mic-wave span:nth-child(1){height:6px;animation-delay:0s}
+.mic-wave span:nth-child(2){height:14px;animation-delay:.1s}
+.mic-wave span:nth-child(3){height:10px;animation-delay:.2s}
+.mic-wave span:nth-child(4){height:18px;animation-delay:.3s}
+.mic-wave span:nth-child(5){height:8px;animation-delay:.4s}
+.mic-wave span:nth-child(6){height:12px;animation-delay:.5s}
+@keyframes micW{0%,100%{transform:scaleY(.4)}50%{transform:scaleY(1)}}
+.mic-result{display:none;position:fixed;left:0;right:0;bottom:0;z-index:120;padding:1.1rem 1.2rem 1.5rem;flex-direction:column;align-items:center;gap:.4rem;animation:slideUp .25s ease}
+.mic-result.show{display:flex}
+.mic-result.r-perfect{background:var(--green)}
+.mic-result.r-good{background:var(--amber)}
+.mic-result.r-fail{background:var(--red)}
+.mic-result-stars{font-size:1.6rem;letter-spacing:.1rem}
+.mic-result-pct{font-family:'Courier Prime',monospace;font-size:1.5rem;font-weight:700;color:var(--paper)}
+.mic-result-msg{font-family:'IM Fell English',serif;font-style:italic;font-size:1.05rem;color:rgba(244,238,228,.95)}
+.mic-result-said{font-family:'IM Fell English',serif;font-style:italic;font-size:.82rem;color:rgba(244,238,228,.6);text-align:center;padding:0 1rem;line-height:1.4}
+.mic-retry{background:rgba(244,238,228,.18);border:1px solid rgba(244,238,228,.35);color:var(--paper);font-family:'Courier Prime',monospace;font-size:.72rem;padding:.4rem 1rem;border-radius:2px;cursor:pointer;margin-top:.3rem}
+
 </style>
 <!-- Azure Speech SDK -->
 <script defer src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
@@ -935,6 +962,13 @@ body.has-tabs .play-header{padding:.35rem .68rem}
 
 <!-- FAB PLAY -->
 <div class="fab-play" id="fab-play" onclick="togglePlay()">▶</div>
+ <div class="mic-overlay" id="mic-overlay">
+  <div class="mic-prompt" id="mic-prompt">À toi de parler…</div>
+  <div class="mic-circle">🎤</div>
+  <div class="mic-wave"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <button class="mic-retry" onclick="stopMicEval()" style="background:rgba(244,238,228,.12)">Annuler</button>
+</div>
+<div class="mic-result" id="mic-result"></div>
   <div class="souffleur-hint" id="souffleur-hint"></div>
   <div class="loop-badge" id="loop-badge">🔁 Boucle active</div>
   <div class="rec-indicator" id="rec-indicator">⏺ REC</div>
@@ -5147,6 +5181,168 @@ function setModeFromSettings(modeId){
   switchTab('texte');
 }
 
+// ════ ÉVALUATION VOCALE ════
+const MIC = {
+  active:false, reco:null, got:false, restarts:0,
+};
+function getHFKey(){ return localStorage.getItem('it.hf_key')||''; }
+function micEnabled(){ return (localStorage.getItem('it.mic_mode')||'manuel')!=='off'; }
+function micMode(){ return localStorage.getItem('it.mic_mode')||'manuel'; }
+function micThreshold(){ return parseInt(localStorage.getItem('it.mic_threshold')||'75'); }
+function micAutoAdvance(){ return localStorage.getItem('it.mic_advance')==='1'; }
+function micSounds(){ return localStorage.getItem('it.mic_sounds')!=='0'; }
+
+const MIC_MODES_OK=['lecture','masquer','blanc','souffleur','amorce','aleatoire'];
+
+// Mots vides à ignorer dans le scoring mots-clés
+const STOP_WORDS=new Set(['je','tu','il','elle','on','nous','vous','ils','elles','le','la','les','un','une','des','de','du','que','qui','quoi','dont','où','à','au','aux','et','ou','mais','donc','or','ni','car','ce','cet','cette','ces','mon','ma','mes','ton','ta','tes','son','sa','ses','notre','votre','leur','en','y','se','si','ne','pas','plus','dans','sur','sous','pour','par','avec','sans','est','suis','es','sommes','êtes','sont','ai','as','a','avons','avez','ont','c','j','l','d','m','n','s','t','qu']);
+
+function extractKeywords(text){
+  return text.toLowerCase()
+    .replace(/[.,;:!?«»""''…\-–—()]/g,' ')
+    .split(/\s+/)
+    .map(w=>w.replace(/^[''']/,''))
+    .filter(w=>w.length>1&&!STOP_WORDS.has(w));
+}
+function scoreKeywords(spoken, reference){
+  const ref=extractKeywords(reference);
+  if(!ref.length)return 0;
+  const said=new Set(extractKeywords(spoken));
+  let hit=0; ref.forEach(w=>{ if(said.has(w))hit++; });
+  return hit/ref.length;
+}
+async function scoreSemantic(spoken, reference){
+  const key=getHFKey(); if(!key)return null;
+  try{
+    const r=await fetch('https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
+      body:JSON.stringify({inputs:{source_sentence:reference,sentences:[spoken]}}),
+    });
+    if(!r.ok)return null;
+    const data=await r.json();
+    if(Array.isArray(data)&&typeof data[0]==='number')return data[0];
+    return null;
+  }catch{ return null; }
+}
+
+// Sons synthétiques via Web Audio
+function playFeedbackSound(type){
+  if(!micSounds())return;
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const now=ctx.currentTime;
+    const beep=(freq,start,dur,vol=.18)=>{
+      const o=ctx.createOscillator(),g=ctx.createGain();
+      o.type='sine';o.frequency.value=freq;
+      g.gain.setValueAtTime(0,now+start);
+      g.gain.linearRampToValueAtTime(vol,now+start+.02);
+      g.gain.exponentialRampToValueAtTime(.001,now+start+dur);
+      o.connect(g);g.connect(ctx.destination);
+      o.start(now+start);o.stop(now+start+dur);
+    };
+    if(type==='perfect'){ beep(523,0,.15);beep(659,.13,.15);beep(784,.26,.25); }
+    else if(type==='good'){ beep(523,0,.15);beep(659,.13,.22); }
+    else if(type==='fail'){ beep(330,0,.2);beep(247,.18,.28); }
+  }catch{}
+}
+
+let _micRetryDi=null;
+function startMicEval(di){
+  if(di===undefined)di=S.lineIdx;
+  const cur=S.dialogues[di]; if(!cur||!isMyLine(cur.role))return;
+  if(!MIC_MODES_OK.includes(S.mode))return;
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ toast('🎤 Micro non supporté sur ce navigateur'); return; }
+  if(location.protocol==='file:'){ toast('❌ Le micro nécessite HTTPS'); return; }
+
+  _micRetryDi=di;
+  MIC.active=true; MIC.got=false; MIC.restarts=0;
+  $('mic-result').classList.remove('show');
+  const p=$('mic-prompt'); if(p)p.textContent='À toi de parler…';
+  $('mic-overlay').classList.add('show');
+  _micStart(cur);
+}
+function _micStart(cur){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  const r=new SR();
+  r.lang='fr-FR'; r.continuous=false; r.interimResults=true; r.maxAlternatives=3;
+  MIC.reco=r;
+  r.onresult=e=>{
+    MIC.got=true; MIC.restarts=0;
+    const tr=e.results[0][0].transcript.trim();
+    const p=$('mic-prompt'); if(p)p.textContent='« '+tr+' »';
+    if(e.results[0].isFinal){ _micEvaluate(tr,cur); }
+  };
+  r.onerror=ev=>{
+    if(ev.error==='no-speech'){
+      if(MIC.restarts<4&&MIC.active){ MIC.restarts++; _micRestart(cur); }
+      else { toast('Rien capté — parle plus près'); stopMicEval(); }
+      return;
+    }
+    if(ev.error==='aborted'||ev.error==='interrupted')return;
+    if(ev.error==='not-allowed'){ toast('❌ Micro refusé'); stopMicEval(); return; }
+    if(ev.error==='network'){ toast('❌ Connexion requise pour le micro'); stopMicEval(); return; }
+    stopMicEval();
+  };
+  r.onend=()=>{ if(MIC.active&&!MIC.got&&MIC.restarts<6){ MIC.restarts++; _micRestart(cur); } };
+  try{ r.start(); }catch{ stopMicEval(); }
+}
+function _micRestart(cur){
+  try{ MIC.reco?.abort(); }catch{}
+  MIC.reco=null;
+  setTimeout(()=>{ if(MIC.active)_micStart(cur); },250);
+}
+async function _micEvaluate(spoken, cur){
+  MIC.active=false;
+  try{ MIC.reco?.abort(); }catch{}
+  $('mic-overlay').classList.remove('show');
+
+  const kw=scoreKeywords(spoken, cur.text);
+  let final=kw;
+  // Sémantique seulement si zone grise et clé présente
+  if(kw>=0.40&&kw<=0.85&&getHFKey()){
+    const sem=await scoreSemantic(spoken, cur.text);
+    if(sem!==null)final=Math.max(kw,sem);
+  }
+  const pct=Math.round(final*100);
+  logSession('reco',final);
+  _showMicResult(pct,spoken,cur);
+}
+function _showMicResult(pct,spoken,cur){
+  const el=$('mic-result'); if(!el)return;
+  let cls,stars,msg,sound;
+  if(pct>=90){ cls='r-perfect';stars='🌟';msg='Bravo, c\'est parfait !';sound='perfect'; }
+  else if(pct>=70){ cls='r-good';stars='⭐⭐';msg='Le sens y est, continue !';sound='good'; }
+  else if(pct>=40){ cls='r-fail';stars='⭐';msg='On réessaie ensemble !';sound='fail'; }
+  else { cls='r-fail';stars='⭐';msg='On réessaie ensemble !';sound='fail'; }
+  playFeedbackSound(sound);
+  const ok=pct>=micThreshold();
+  el.className='mic-result show '+cls;
+  el.innerHTML=`
+    <div class="mic-result-stars">${stars}</div>
+    <div class="mic-result-pct">${pct}%</div>
+    <div class="mic-result-msg">${msg}</div>
+    <div class="mic-result-said">Tu as dit : « ${esc(spoken)} »</div>
+    ${!ok?`<button class="mic-retry" onclick="retryMicEval()">↺ Réessayer</button>`:''}
+    <button class="mic-retry" onclick="closeMicResult()" style="background:rgba(244,238,228,.12)">Continuer ›</button>`;
+  // Avance auto si réussite
+  if(ok&&micAutoAdvance()){
+    setTimeout(()=>{ closeMicResult(); if(S._myTurnPending){togglePlay();} }, 1800);
+  }
+}
+function retryMicEval(){
+  $('mic-result').classList.remove('show');
+  startMicEval(_micRetryDi);
+}
+function closeMicResult(){ $('mic-result').classList.remove('show'); }
+function stopMicEval(){
+  MIC.active=false; MIC.got=false;
+  try{ MIC.reco?.abort(); }catch{}
+  MIC.reco=null;
+  $('mic-overlay').classList.remove('show');
+}
+  
 // ════ MENU CONTEXTUEL RÉPLIQUE ════
 function showLineMenu(di){
   $('line-menu')?.remove();
@@ -5170,22 +5366,27 @@ function showLineMenu(di){
         <div style="font-family:'IM Fell English',serif;font-style:italic;font-size:.8rem;color:rgba(244,238,228,.7);line-height:1.5">«&nbsp;${esc(d.text.slice(0,60))}${d.text.length>60?'…':''}&nbsp;»</div>
       </div>
       <div style="padding:14px 14px 18px;display:flex;flex-direction:column;gap:8px">
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+       <div style="display:grid;grid-template-columns:1fr 1fr 1fr${isMyLine(d.role)?' 1fr':''};gap:8px">
           <button onclick="event.stopPropagation();toggleBookmark(${di});$('line-menu')?.remove()"
-            style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 8px;border-radius:14px;background:${bm?'#8A1818':'#EBE3D4'};border:none;cursor:pointer">
-            <span style="font-size:1.8rem">🔖</span>
-            <span style="font-family:'Courier Prime',monospace;font-size:.55rem;text-transform:uppercase;letter-spacing:.1em;color:${bm?'#F4EEE4':'#18120A'}">${bm?'Marqué':'Marquer'}</span>
+            style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 8px;border-radius:12px;background:${bm?'#8A1818':'#EBE3D4'};border:none;cursor:pointer">
+            <span style="font-size:1.6rem">🔖</span>
+            <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:${bm?'#F4EEE4':'#18120A'}">${bm?'Marqué':'Marquer'}</span>
           </button>
-        <button onclick="event.stopPropagation();$('line-menu')?.remove();setTimeout(()=>openNote(${di}),50)"
+          <button onclick="event.stopPropagation();$('line-menu')?.remove();setTimeout(()=>openNote(${di}),50)"
             style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 8px;border-radius:12px;background:#EBE3D4;border:none;cursor:pointer">
-            <span style="font-size:1.8rem">📝</span>
-            <span style="font-family:'Courier Prime',monospace;font-size:.55rem;text-transform:uppercase;letter-spacing:.1em;color:#18120A">Note</span>
+            <span style="font-size:1.6rem">📝</span>
+            <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:#18120A">Note</span>
           </button>
           <button onclick="event.stopPropagation();hearLine(${di});$('line-menu')?.remove()"
             style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 8px;border-radius:12px;background:#EBE3D4;border:none;cursor:pointer">
-            <span style="font-size:1.8rem">🔊</span>
-            <span style="font-family:'Courier Prime',monospace;font-size:.55rem;text-transform:uppercase;letter-spacing:.1em;color:#18120A">Écouter</span>
+            <span style="font-size:1.6rem">🔊</span>
+            <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:#18120A">Écouter</span>
           </button>
+          ${isMyLine(d.role)?`<button onclick="event.stopPropagation();$('line-menu')?.remove();setTimeout(()=>startMicEval(${di}),60)"
+            style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 8px;border-radius:12px;background:#8A1818;border:none;cursor:pointer">
+            <span style="font-size:1.6rem">🎤</span>
+            <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:#F4EEE4">Réciter</span>
+          </button>`:''}
         </div>
         <button onclick="event.stopPropagation();jumpLine(${di});$('line-menu')?.remove()"
           style="display:flex;align-items:center;gap:10px;padding:11px 16px;background:#EBE3D4;border-radius:10px;border:none;cursor:pointer;width:100%">
