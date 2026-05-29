@@ -1460,7 +1460,8 @@ async function testAZKey(){
   btn.textContent='…'; btn.disabled=true;
   try{
     const blob = await _azFetch('Bonjour, je suis Denise, voix Azure Neural.', 'fr-FR-DeniseNeural');
-    playAudioBlob(blob, ()=>{ btn.textContent='▶ Tester'; btn.disabled=false; });
+    const rate = parseFloat($('tts-speed')?.value || 1);
+playAudioBlob(blob, ()=>{ btn.textContent='▶ Tester'; btn.disabled=false; }, rate);
     $('az-status').textContent='✓ Fonctionne — Denise Neural';
     $('az-status').style.color='var(--green)';
   }catch(e){
@@ -1606,7 +1607,8 @@ async function testELKey(){
     // Tester avec la première voix disponible
     const v = _elVoices[0];
     const blob = await _elFetch('Bonjour, test réussi !', v.voice_id);
-    playAudioBlob(blob, ()=>{ btn.textContent='▶ Tester'; btn.disabled=false; });
+    const rate = parseFloat($('tts-speed')?.value || 1);
+playAudioBlob(blob, ()=>{ btn.textContent='▶ Tester'; btn.disabled=false; }, rate);
     $('el-status').textContent = '✓ Fonctionne — '+_elVoices.length+' voix chargées';
     $('el-status').style.color = 'var(--green)';
   } catch(e){
@@ -1651,28 +1653,43 @@ async function _elFetch(text, voiceId){
   return blob;
 }
 
-function playAudioBlob(blob, onend){
+function playAudioBlob(blob, onend, playbackRate = 1){
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   let done=false;
   const finish=()=>{ if(done)return; done=true; URL.revokeObjectURL(url); onend?.(); };
   audio.onended = finish;
   audio.onerror = ()=>{ console.warn('[audio onerror]',audio.error?.code); finish(); };
-  // Normalisation volume via Web Audio API – avec fallback silencieux
   try{
-    const ctx=new AudioContext();
-    const src=ctx.createMediaElementSource(audio);
-    const gain=ctx.createGain();
-    gain.gain.value=1.4;
-    src.connect(gain);
-    gain.connect(ctx.destination);
+    const ctx = new AudioContext();
+    // Si le contexte n'est pas actif, le démarrer au premier clic
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(() => {
+        const src = ctx.createMediaElementSource(audio);
+        const gain = ctx.createGain();
+        gain.gain.value = 1.4;
+        src.connect(gain);
+        gain.connect(ctx.destination);
+        // Appliquer la vitesse de lecture (playbackRate) sur le MediaElement
+        audio.playbackRate = playbackRate;
+      });
+    } else {
+      const src = ctx.createMediaElementSource(audio);
+      const gain = ctx.createGain();
+      gain.gain.value = 1.4;
+      src.connect(gain);
+      gain.connect(ctx.destination);
+      audio.playbackRate = playbackRate;
+    }
   }catch(e){
-    // Si Web Audio échoue (ex: Safari sans interaction), on joue normalement
     console.log("Web Audio non disponible, lecture normale");
+    // Fallback : tenter de modifier directement la propriété
+    audio.playbackRate = playbackRate;
   }
   audio.play().catch(e=>{ console.error('[play rejected]',e); finish(); });
   return audio;
 }
+
 const VOICE_PROFILES=[
   {label:'Neutre',     pitch:1.0, rate:1.0},
   {label:'Grave',      pitch:0.6, rate:0.9},
@@ -1712,10 +1729,11 @@ const TTS={
     // 1. 🔥 LECTURE PRIORITAIRE DEPUIS LE CACHE ELEVENLABS
     const cacheKeyEl = `${voiceId}||${lim}`;
     const cachedBlob = await audioCacheGet(cacheKeyEl);
-    if (cachedBlob) {
-        this._curAudio = playAudioBlob(cachedBlob, opts.onend);
-        return;
-    }
+if (cachedBlob) {
+    const rate = parseFloat($('tts-speed')?.value || 1);
+    this._curAudio = playAudioBlob(cachedBlob, opts.onend, rate);
+    return;
+}
 
     // 2. Fallback : Azure (si clé présente)
     const isAzVoice = _azVoices.some(v => v.id === voiceId);
@@ -1723,8 +1741,9 @@ const TTS={
     if (isAzVoice && azKey) {
         try {
             const blob = await _azFetch(lim, voiceId);
-            this._curAudio = playAudioBlob(blob, opts.onend);
-            return;
+const rate = parseFloat($('tts-speed')?.value || 1);
+this._curAudio = playAudioBlob(blob, opts.onend, rate);
+return;
         } catch (e) {
             console.warn('Azure TTS fallback:', e.message);
         }
@@ -1735,9 +1754,10 @@ const TTS={
     try{const cachedBlob=await audioCacheGet(voiceId+'||'+lim);if(cachedBlob){this._curAudio=playAudioBlob(cachedBlob,opts.onend);return;}}catch{}
     if (elKey && isELVoice) {
         try {
-            const blob = await _elFetch(lim, voiceId);
-            this._curAudio = playAudioBlob(blob, opts.onend);
-            return;
+           const blob = await _elFetch(lim, voiceId);
+const rate = parseFloat($('tts-speed')?.value || 1);
+this._curAudio = playAudioBlob(blob, opts.onend, rate);
+return;
         } catch (e) {
             console.warn('EL TTS fallback:', e.message);
         }
