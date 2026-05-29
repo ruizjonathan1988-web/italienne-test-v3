@@ -2740,7 +2740,7 @@ function playStep(){
 
   const isMe = isMyLine(cur.role);
   const lim = parseInt($('line-limit')?.value||0);
-
+    if(!isMe){
        if(S.reduceListening){
       const nextMyIdx = S.dialogues.findIndex((d,i)=>i>S.lineIdx && S.myRoles.includes(d.role));
       const gap = nextMyIdx - S.lineIdx;
