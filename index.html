@@ -2796,10 +2796,13 @@ function resetSouffleur(){clearSouffleur();if(S._myTurnPending&&S.mode==='souffl
 // ════ MODE BOUCLE ════
 function toggleLoop(){
   S.loopActive=!S.loopActive;
-  $('bb-loop').classList.toggle('active',S.loopActive);
-  $('loop-badge').classList.toggle('show',S.loopActive);
+  const loopBtn = document.getElementById('bb-loop');
+  if (loopBtn) loopBtn.classList.toggle('active', S.loopActive);
+  const badge = document.getElementById('loop-badge');
+  if (badge) badge.classList.toggle('show', S.loopActive);
   toast(S.loopActive?'🔁 Boucle activée':'Boucle désactivée');
 }
+
 // Dans navigate(), si loopActive et fin atteinte → revenir au début de la réplique courante
 // Intégré dans navigate() plus bas via un wrap
 
