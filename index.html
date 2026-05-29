@@ -966,7 +966,11 @@ body.has-tabs .play-header{padding:.35rem .68rem}
 </div>
 
 <!-- FAB PLAY -->
-<div class="fab-play" id="fab-play" onclick="onFabTap()">▶</div>
+<div class="fab-play" id="fab-play"
+  onclick="onFabTap()"
+  onpointerdown="onFabPointerDown(event)"
+  onpointerup="onFabPointerUp(event)"
+  onpointercancel="onFabPointerUp(event)">▶</div>
  <div class="mic-overlay" id="mic-overlay">
   <div class="mic-prompt" id="mic-prompt">À toi de parler…</div>
   <div class="mic-circle">🎤</div>
@@ -4641,6 +4645,86 @@ function onFabTap(){
   }
 }
 
+// ── PUSH-TO-TALK ──
+// En mode manuel : appui = démarre, relâchement = évalue immédiatement
+let _pttActive = false;
+let _pttHoldT = null;
+
+function onFabPointerDown(e){
+  if(micMode() !== 'manuel') return; // PTT seulement en mode manuel
+  const cur = S.dialogues[S.lineIdx];
+  const isMyTurn = S._myTurnPending && !S.isPlaying;
+  const isMicMode = MIC_MODES_OK.includes(S.mode);
+  if(!isMyTurn || !isMicMode || !cur || !isMyLine(cur.role)) return;
+  if(_micTimerExpired) return; // déjà en mode "suivant"
+  e.preventDefault();
+  _pttActive = true;
+  _stopMicTimer();
+  // Démarrer le micro en mode continu pour PTT
+  _micStartPTT(cur);
+}
+
+function onFabPointerUp(e){
+  if(!_pttActive) return;
+  e.preventDefault();
+  _pttActive = false;
+  _micStopPTT();
+}
+
+function _micStartPTT(cur){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ toast('🎤 Non supporté'); return; }
+  MIC.active=true; MIC.got=false; MIC.restarts=0;
+  MIC._pttCur=cur;
+  MIC._pttAlts=[];
+  $('mic-result').classList.remove('show');
+  const p=$('mic-prompt'); if(p)p.textContent='🎤 Parle…';
+  $('mic-overlay').classList.add('show');
+  const r=new SR();
+  r.lang='fr-FR'; r.continuous=true; r.interimResults=true; r.maxAlternatives=3;
+  MIC.reco=r;
+  r.onresult=e=>{
+    MIC.got=true;
+    const res=e.results[e.results.length-1];
+    const tr=res[0].transcript.trim();
+    const p=$('mic-prompt'); if(p)p.textContent='« '+tr+' »';
+    // Accumuler les alternatives du dernier résultat final
+    if(res.isFinal){
+      MIC._pttAlts=[];
+      for(let i=0;i<Math.min(res.length,3);i++) MIC._pttAlts.push(res[i].transcript.trim());
+    }
+  };
+  r.onerror=ev=>{
+    if(ev.error==='aborted'||ev.error==='interrupted')return;
+    if(ev.error==='not-allowed'){ toast('❌ Micro refusé'); stopMicEval(); return; }
+    stopMicEval();
+  };
+  r.onend=()=>{
+    // Si relâché et qu'on a des résultats → évaluer
+    if(!_pttActive && MIC.got && MIC._pttAlts.length){
+      $('mic-overlay').classList.remove('show');
+      MIC.active=false;
+      _micEvaluate(MIC._pttAlts, MIC._pttCur);
+    } else if(!_pttActive && !MIC.got){
+      toast('Rien capté — parle plus près');
+      stopMicEval();
+    }
+  };
+  try{ r.start(); }catch{ stopMicEval(); }
+}
+
+function _micStopPTT(){
+  // Arrêter le micro → onend se chargera de l'évaluation
+  if(MIC.reco){
+    try{ MIC.reco.stop(); }catch{}
+  }
+  $('mic-overlay').classList.remove('show');
+  if(!MIC.got){
+    MIC.active=false;
+    toast('Rien capté — parle plus près');
+  }
+}
+
 let _micTimerT = null;
 
 function _startMicTimer(){
@@ -5334,7 +5418,7 @@ function _micStart(cur){
       // Récupérer jusqu'à 3 alternatives
       const alts=[];
       for(let i=0;i<Math.min(res.length,3);i++) alts.push(res[i].transcript.trim());
-      _micEvaluate(alts, cur);
+      setTimeout(()=>_micEvaluate(alts, cur), 600);
     }
   };
   r.onerror=ev=>{
@@ -5410,7 +5494,7 @@ function _showMicResult(pct,spoken,cur){
     <button class="mic-retry" onclick="closeMicResult()" style="background:rgba(244,238,228,.12)">Continuer ›</button>`;
   // Avance auto si réussite
   if(ok&&micAutoAdvance()){
-    setTimeout(()=>{ closeMicResult(); if(S._myTurnPending){togglePlay();} }, 1800);
+    setTimeout(()=>{ closeMicResult(); if(S._myTurnPending){togglePlay();} }, 2500);
   }
 }
 function retryMicEval(){
@@ -5464,7 +5548,11 @@ function showLineMenu(di){
             <span style="font-size:1.6rem">🔊</span>
             <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:#18120A">Écouter</span>
           </button>
-          ${isMyLine(d.role)?`<button onclick="event.stopPropagation();$('line-menu')?.remove();setTimeout(()=>startMicEval(${di}),60)"
+          ${isMyLine(d.role)?`<button
+            onpointerdown="if(micMode()==='manuel'){event.stopPropagation();event.preventDefault();_pttActive=true;_stopMicTimer();_micStartPTT(S.dialogues[${di}]);}"
+            onpointerup="if(_pttActive){event.preventDefault();_pttActive=false;_micStopPTT();}"
+            onpointercancel="if(_pttActive){_pttActive=false;_micStopPTT();}"
+            onclick="if(micMode()!=='manuel'){event.stopPropagation();$('line-menu')?.remove();setTimeout(()=>startMicEval(${di}),60);}"
             style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 8px;border-radius:12px;background:#8A1818;border:none;cursor:pointer">
             <span style="font-size:1.6rem">🎤</span>
             <span style="font-family:'Courier Prime',monospace;font-size:.52rem;text-transform:uppercase;letter-spacing:.08em;color:#F4EEE4">Réciter</span>
