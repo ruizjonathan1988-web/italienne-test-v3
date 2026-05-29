@@ -4788,6 +4788,13 @@ function _startMicTimer(){
     fill.style.transition = 'width ' + dur + 'ms linear';
     fill.style.width = '0%';
   });
+  // Mode auto : lancer le micro apres 1s
+  if(micMode()==='auto'){
+    setTimeout(()=>{
+      if(S._myTurnPending && !MIC.active) startMicEval(S.lineIdx);
+    }, 1000);
+  }
+
   _micTimerT = setTimeout(()=>{
     _stopMicTimer();
     if(!S._myTurnPending) return;
@@ -4798,7 +4805,7 @@ function _startMicTimer(){
       resetHeader(); clearSouffleur();
       _advanceAndPlay();
     } else {
-      // Barre finie, pas d'avance auto : FAB devient › (suivant)
+      // Barre finie, pas d'avance auto : FAB devient ⏭ (suivant)
       _micTimerExpired = true;
       updateFabPlay();
     }
@@ -5163,6 +5170,7 @@ function renderSettingsTab(tab){
         <div class="segment" style="min-width:120px">
         <div class="seg-opt ${micMode()==='off'?'active':''}" onclick="localStorage.setItem('it.mic_mode','off');renderSettingsTab('session')">Off</div>
           <div class="seg-opt ${micMode()==='manuel'?'active':''}" onclick="localStorage.setItem('it.mic_mode','manuel');renderSettingsTab('session')">Manuel</div>
+          <div class="seg-opt ${micMode()==='auto'?'active':''}" onclick="localStorage.setItem('it.mic_mode','auto');renderSettingsTab('session')">Auto</div>
         </div>
       </div>
       <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:.3rem">
@@ -5377,7 +5385,13 @@ function scoreKeywords(spoken, reference){
   const ref=extractKeywords(reference);
   if(!ref.length)return 0;
   const said=new Set(extractKeywords(spoken));
-  let hit=0; ref.forEach(w=>{ if(said.has(w))hit++; });
+  // Scoring exact + scoring normalisé (sans accents)
+  const normW=w=>w.normalize('NFD').replace(/[̀-ͯ]/g,'');
+  const saidNorm=new Set([...said].map(normW));
+  let hit=0;
+  ref.forEach(w=>{
+    if(said.has(w)||saidNorm.has(normW(w))) hit++;
+  });
   return hit/ref.length;
 }
 async function scoreSemantic(spoken, reference){
@@ -5439,9 +5453,15 @@ function _micStart(cur){
   MIC.reco=r;
   r.onresult=e=>{
     MIC.got=true; MIC.restarts=0;
-    const tr=e.results[0][0].transcript.trim();
+    const res=e.results[0];
+    const tr=res[0].transcript.trim();
     const p=$('mic-prompt'); if(p)p.textContent='« '+tr+' »';
-    if(e.results[0].isFinal){ _micEvaluate(tr,cur); }
+    if(res.isFinal){
+      // Récupérer jusqu'à 3 alternatives
+      const alts=[];
+      for(let i=0;i<Math.min(res.length,3);i++) alts.push(res[i].transcript.trim());
+      _micEvaluate(alts, cur);
+    }
   };
   r.onerror=ev=>{
     if(ev.error==='no-speech'){
@@ -5462,21 +5482,40 @@ function _micRestart(cur){
   MIC.reco=null;
   setTimeout(()=>{ if(MIC.active)_micStart(cur); },250);
 }
-async function _micEvaluate(spoken, cur){
+function _normText(t){
+  return t.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'') // accents
+    .replace(/['''’]/g,'')                       // apostrophes
+    .replace(/[.,;:!?«»""()\-–—]/g,' ')              // ponctuation
+    .replace(/\s+/g,' ').trim();
+}
+function _scoreBest(alternatives, reference){
+  let best=0;
+  const ref=_normText(reference);
+  for(let i=0;i<alternatives.length;i++){
+    const spoken=_normText(alternatives[i]);
+    const s=scoreKeywords(spoken, ref);
+    if(s>best) best=s;
+  }
+  return best;
+}
+
+async function _micEvaluate(alternatives, cur){
   MIC.active=false;
   try{ MIC.reco?.abort(); }catch{}
   $('mic-overlay').classList.remove('show');
 
-  const kw=scoreKeywords(spoken, cur.text);
+  // Scorer les 3 alternatives, garder le meilleur
+  const kw=_scoreBest(alternatives, cur.text);
   let final=kw;
-  // Sémantique seulement si zone grise et clé présente
+  // Sémantique seulement si zone grise et clé présente (sur la 1ère alternative)
   if(kw>=0.40&&kw<=0.85&&getHFKey()){
-    const sem=await scoreSemantic(spoken, cur.text);
+    const sem=await scoreSemantic(alternatives[0], cur.text);
     if(sem!==null)final=Math.max(kw,sem);
   }
   const pct=Math.round(final*100);
   logSession('reco',final);
-  _showMicResult(pct,spoken,cur);
+  _showMicResult(pct,alternatives[0],cur);
 }
 function _showMicResult(pct,spoken,cur){
   const el=$('mic-result'); if(!el)return;
