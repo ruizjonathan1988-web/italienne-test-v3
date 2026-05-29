@@ -2082,7 +2082,7 @@ updateFabPlay();
 if(!S.myRole||S.myRole===S.play.roles[0]?.name){
   setTimeout(showRoleLayer, 400);
 }
-  $('mode-badge').textContent=MODES.find(m=>m.id===S.mode)?.label.toUpperCase()||'LECTURE';
+const _mb1=$('mode-badge');if(_mb1)_mb1.textContent=MODES.find(m=>m.id===S.mode)?.label.toUpperCase()||'LECTURE';
   $('loop-badge').classList.remove('show');
   renderSidebar();renderContent();updateBottomBar();updateAutochainUI();
 
@@ -2235,7 +2235,7 @@ function toggleExtraRole(name){
 }
 function setMode(m){
   S.mode=m;stopAll();S.revealed=new Set();saveSettings();
-  $('mode-badge').textContent=MODES.find(x=>x.id===m)?.label.toUpperCase()||m;
+  const _mb2=$('mode-badge');if(_mb2)_mb2.textContent=MODES.find(x=>x.id===m)?.label.toUpperCase()||m;
   renderModes();renderContent();updateBottomBar();
   // Afficher la section blanc progressif seulement en mode blanc
   $('sb-blanc').style.display=m==='blanc'?'block':'none';
