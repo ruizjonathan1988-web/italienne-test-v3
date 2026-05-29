@@ -1175,7 +1175,11 @@ function loading(show,msg='',sub=''){$('loading').classList.toggle('show',show);
 function showScreen(n){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   const s=$('screen-'+n);if(s)s.classList.add('active');
-  if(n==='library')renderLibrary();
+    if(n==='library'){
+    if(S.play) cleanupPlayTimers();
+    S.play = null;
+    renderLibrary();
+  }
   if(n==='library')history.replaceState({},'','');
   else history.pushState({},'','');
 }
@@ -1872,7 +1876,9 @@ const S={
   searchMatches:[],searchIdx:0,
   _myTurnPending:false,_afterPending:false,_scrubInited:false,
   _recoActive:false,_recoGotResult:false,_recMediaRecorder:null,_recChunks:[],_recPlayId:null,
-  _sessionStart:null,
+    _sessionStart:null,
+  _playStepLock: false,
+  _playStepTimeout: null,
 };
 
 function saveSettings(){
@@ -1956,7 +1962,10 @@ async function renderLibrary(){
 async function toggleFav(id){const p=S.plays.find(p=>p.id===id);if(!p)return;p.favorite=!p.favorite;await DB.put('plays',p);S.plays.sort((a,b)=>{if(a.favorite&&!b.favorite)return-1;if(!a.favorite&&b.favorite)return 1;return b.importedAt-a.importedAt;});renderLibrary();}
 async function deletePlay(id){
   if(!confirm('Supprimer cette pièce ?'))return;
-  await DB.del('plays',id);
+    if(S.play && S.play.id === id) {
+    cleanupPlayTimers();
+    S.play = null;
+  }
   await DB.del('positions',id);
   await DB.del('progress',id);
   await DB.del('highlights',id);
@@ -2080,6 +2089,7 @@ async function openPlay(id){
   if(!play){toast('Pièce introuvable');return;}
 
   S.play=play;
+   cleanupPlayTimers();
   // Forcer mode lecture si mode masquant — évite l'écran blanc
   if(['masquer','souffleur','blanc'].includes(S.mode))S.mode='lecture';
   S.myRole=play.roles[0]?.name||null;
@@ -2257,15 +2267,8 @@ function toggleExtraRole(name){
   stopAll();renderRoles();renderContent();
   toast(S.myRoles.length>1?'Multi-rôle : '+S.myRoles.join(', '):'Rôle : '+S.myRoles[0]);
 }
-function setMode(m){
-  S.mode=m;stopAll();S.revealed=new Set();saveSettings();
-  const _mb2=$('mode-badge');if(_mb2)_mb2.textContent=MODES.find(x=>x.id===m)?.label.toUpperCase()||m;
-  renderModes();renderContent();updateBottomBar();
-  // Afficher la section blanc progressif seulement en mode blanc
-  $('sb-blanc').style.display=m==='blanc'?'block':'none';
-  if(m==='blanc'){updateBlancDisplay();}
-}
-function updateBottomBar(){const el=$('bb-reveal');if(el)el.style.display=['masquer','souffleur'].includes(S.mode)?'flex':'none';}
+
+
 
 // ════ NAVIGATION ════
 // Historique de navigation pour mode aléatoire
@@ -2393,7 +2396,7 @@ function renderBlancText(text,di){
     if(threshold<ratio){
       // Remplacer par des underscores de longueur similaire
       const underscores='_'.repeat(Math.max(2,Math.min(token.length,8)));
-      return`<span class="blanc-word" onclick="event.stopPropagation();toggleRevealWord(this,'${esc(token)}')" title="Tap pour révéler">${underscores}</span>`;
+      return`<span class="blanc-word" data-word="${esc(token.replace(/'/g, '&#39;'))}" onclick="event.stopPropagation();toggleRevealWord(this)" title="Tap pour révéler">${underscores}</span>`;
     }
     return esc(token);
   }).join('');
@@ -2517,7 +2520,6 @@ function initScrubber(){
     if(sc.hasPointerCapture(e.pointerId))sc.releasePointerCapture(e.pointerId);
   });
 }
-
 // ════ PLAY / STOP ════
 // DESIGN: le mode d'affichage (lecture/masquer/karaoke/etc.) est INDÉPENDANT
 // du comportement TTS. ▶ lance toujours l'auto-play TTS.
@@ -2529,59 +2531,111 @@ function initScrubber(){
 //   chain       → lit ma ligne et enchaîne automatiquement
 
 function togglePlay(){
-  if(S.isPlaying){stopAll();return;}
+  if(S.isPlaying){
+    stopAll();
+    return;
+  }
+  if(S._playStepLock) return;
 
-  // Cas "après" : l'utilisateur vient de dire sa réplique → ▶ la relit puis continue
   if(S._afterPending){
-    S._afterPending=false;S._myTurnPending=false;
+    S._afterPending = false;
+    S._myTurnPending = false;
     clearAutoChainCountdown();
-    const cur=S.dialogues[S.lineIdx];if(!cur)return;
+    const cur = S.dialogues[S.lineIdx];
+    if(!cur) return;
     setHeaderSpeaking(cur.role);
-    TTS.speakRole(cur.text,cur.role,{onend:()=>{
-      resetHeader();
-      _advanceAndPlay();
-    }});
+    TTS.speakRole(cur.text, cur.role, {
+      onend: () => {
+        resetHeader();
+        _advanceAndPlay();
+      }
+    });
     return;
   }
 
-  // Cas "mon tour en attente" (skip ou before) : ▶ avance à la réplique suivante et continue
   if(S._myTurnPending){
-    S._myTurnPending=false;resetHeader();clearSouffleur();clearAutoChainCountdown();_stopMicTimer();
+    S._myTurnPending = false;
+    resetHeader();
+    clearSouffleur();
+    clearAutoChainCountdown();
+    _stopMicTimer();
     _advanceAndPlay();
     return;
   }
 
-  // Cas normal : lancer l'auto-play depuis la position courante
   startPlay();
 }
 
 // Avancer d'une réplique et relancer playStep
 function _advanceAndPlay(){
-  const next=S.lineIdx+1;
-  if(next>=S.dialogues.length){
-    if(S.loopActive){S.lineIdx=0;_nav();startPlay();}
-    else{stopAll();toast('Fin de la pièce ✓');}
+  const next = S.lineIdx + 1;
+  if(next >= S.dialogues.length){
+    if(S.loopActive){
+      S.lineIdx = 0;
+      _nav();
+      startPlay();
+    } else {
+      stopAll();
+      toast('Fin de la pièce ✓');
+    }
     return;
   }
-  S.lineIdx=next;_nav();startPlay();
+  S.lineIdx = next;
+  _nav();
+  startPlay();
 }
 
 function startPlay(){
-  S.isPlaying=true;
-  const bp=$('bb-play');if(bp){bp.classList.add('active');bp.textContent='⏸';}
+  if(S._playStepLock) return;
+  S._playStepLock = false; // sécurité
+  S.isPlaying = true;
+  const fab = $('fab-play');
+if(fab) { fab.classList.add('playing'); fab.textContent = '⏸'; }
   playStep();
   updateFabPlay();
 }
+
 function stopAll(){
-  S.isPlaying=false;
-  TTS.stop();clearSouffleur();clearAutoChainCountdown();_stopMicTimer();
-  const bp=$('bb-play');if(bp){bp.classList.remove('active');bp.textContent='▶';}
+  if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+  S._playStepLock = false;
+  S.isPlaying = false;
+  TTS.stop();
+  clearSouffleur();
+  clearAutoChainCountdown();
+  _stopMicTimer();
+  const fab = $('fab-play');
+if(fab) { fab.classList.remove('playing'); fab.textContent = '▶'; }
   resetHeader();
   updateFabPlay();
 }
 
+function cleanupPlayTimers(){
+  // Nettoyer le timeout de playStep
+  if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+  S._playStepTimeout = null;
+  // Nettoyer l'auto-chain
+  clearAutoChainCountdown();
+  // Nettoyer le souffleur
+  clearSouffleur();
+  // Nettoyer le minuteur (timer scène)
+  if(_timerInt) clearInterval(_timerInt);
+  _timerInt = null;
+  _timerRunning = false;
+  // Nettoyer le timer micro
+  _stopMicTimer();
+  // Nettoyer le timer de boucle ou autre (si besoin)
+  if(S.souffleurT) clearTimeout(S.souffleurT);
+  S.souffleurT = null;
+  // Réinitialiser les verrous
+  S._playStepLock = false;
+  S._myTurnPending = false;
+  S._afterPending = false;
+    if(_saveProgT) clearTimeout(_saveProgT);
+  _saveProgT = null;
+}
 // ── AUTO-CHAIN ──
 let _acT=null,_acAnim=null;
+let _micTimerExpired = false;
 
 function toggleAutoChain(){
   S.autoChain=!S.autoChain;
@@ -2589,6 +2643,7 @@ function toggleAutoChain(){
   updateAutochainUI();
   toast(S.autoChain?'Auto-enchaîner ON':'Auto-enchaîner OFF');
 }
+
 function updateAutochainUI(){
   const btn=$('btn-autochain');
   const row=$('autochain-delay-row');
@@ -2611,15 +2666,11 @@ function clearAutoChainCountdown(){
 
 function startAutoChainCountdown(onDone){
   clearAutoChainCountdown();
-  // Calcul du délai selon la longueur de la réplique courante
-  // ~2.5 mots/seconde au théâtre, ajusté par le multiplicateur de vitesse
   const cur=S.dialogues[S.lineIdx];
   const words=cur?cur.text.split(/\s+/).filter(Boolean).length:5;
   const speedMult=parseFloat($('autochain-delay')?.value||1);
-  // Base: mots / 2.5 mots/s, minimum 2s, maximum 30s, divisé par le multiplicateur
   const baseDelay=Math.max(2000, Math.min(30000, (words/2.5)*1000));
   const delay=Math.round(baseDelay/speedMult);
-  // Afficher le délai calculé dans le header
   const secs=(delay/1000).toFixed(1);
   setHeaderMyTurn($('play-title-hd').innerHTML.replace(/<\/span>$/,`</span> <span style="font-family:'Courier Prime',monospace;font-size:.65rem;color:var(--ink-4)">${secs}s</span>`));
   const fill=$('autochain-bar-fill');
@@ -2640,31 +2691,27 @@ function startAutoChainCountdown(onDone){
 function _pauseMyTurn(afterPending,msg){
   S.isPlaying=false;
   TTS.stop();
-  const bp=$('bb-play');if(bp){bp.classList.remove('active');bp.textContent='▶';}
+  const fab=$('fab-play');if(fab){fab.classList.remove('playing');fab.textContent='▶';}
   S._myTurnPending=true;
   S._afterPending=!!afterPending;
   updateFabPlay();
   setHeaderMyTurn(msg);
   if(S.mode==='souffleur')startSouffleur();
-  // Lancer le timer micro si mode micro actif (prend le dessus sur l'auto-chain)
   const _pmCur=S.dialogues[S.lineIdx];
   const _micActive = MIC_MODES_OK.includes(S.mode) && _pmCur && isMyLine(_pmCur.role) && micEnabled();
   if(_micActive){
     _startMicTimer();
     updateFabPlay();
   }
-  // Auto-enchaîner si activé ET micro non actif
   if(S.autoChain && !_micActive){
     startAutoChainCountdown(()=>{
-      if(!S._myTurnPending)return; // déjà géré
+      if(!S._myTurnPending)return;
       if(S._afterPending){
-        // Mode before_after ou after: relit ma réplique puis avance
         S._afterPending=false;S._myTurnPending=false;
         const cur=S.dialogues[S.lineIdx];if(!cur)return;
         setHeaderSpeaking(cur.role);
         TTS.speakRole(cur.text,cur.role,{onend:()=>{resetHeader();_advanceAndPlay();}});
       } else {
-        // Mode skip ou before: avance directement
         S._myTurnPending=false;resetHeader();clearSouffleur();
         _advanceAndPlay();
       }
@@ -2673,87 +2720,138 @@ function _pauseMyTurn(afterPending,msg){
 }
 
 function playStep(){
-  if(!S.isPlaying)return;
-  const cur=S.dialogues[S.lineIdx];
+  if(!S.isPlaying) return;
+  if(S._playStepLock) return;
+  S._playStepLock = true;
+
+  const cur = S.dialogues[S.lineIdx];
   if(!cur){
-    if(S.loopActive){S.lineIdx=0;_nav();setTimeout(playStep,400);return;}
-    stopAll();toast('Fin de la pièce ✓');return;
-  }
-  const isMe=isMyLine(cur.role);
-  const lim=parseInt($('line-limit')?.value||0);
-
-if(!isMe){
-    // Réduire l'écoute — sauter vers l'amorce si partenaire loin
-    if(S.reduceListening){
-      const nextMyIdx=S.dialogues.findIndex((d,i)=>i>S.lineIdx&&S.myRoles.includes(d.role));
-      const gap=nextMyIdx-S.lineIdx;
-      if(nextMyIdx>0&&gap>3){
-        S.lineIdx=Math.max(S.lineIdx,nextMyIdx-2);
-        _nav();setTimeout(playStep,100);return;
-      }
+    if(S.loopActive){
+      S.lineIdx = 0;
+      _nav();
+      setTimeout(() => { S._playStepLock = false; playStep(); }, 400);
+      return;
     }
-    // Réplique d'un partenaire → TTS la lit
-    setHeaderSpeaking(cur.role);
-
-    TTS.speakRole(cur.text,cur.role,{limit:lim,onend:()=>{
-      resetHeader();
-      if(!S.isPlaying)return;
-      const next=S.lineIdx+1;
-      if(next>=S.dialogues.length){
-        if(S.loopActive){S.lineIdx=0;_nav();setTimeout(playStep,400);return;}
-        stopAll();toast('Fin de la pièce ✓');return;
-      }
-      S.lineIdx=next;_nav();
-      setTimeout(playStep,300);
-    }});
+    stopAll();
+    toast('Fin de la pièce ✓');
+    S._playStepLock = false;
     return;
   }
 
-  // C'est MA réplique — comportement selon myLineBehavior
-  clearSouffleur();
-  const beh=S.myLineBehavior;
+  const isMe = isMyLine(cur.role);
+  const lim = parseInt($('line-limit')?.value||0);
 
-  if(beh==='chain'){
-    // Enchaîner : lit ma réplique et continue directement
-    setHeaderSpeaking(cur.role);
-    TTS.speakRole(cur.text,cur.role,{onend:()=>{
-      resetHeader();
-      if(!S.isPlaying)return;
-      const next=S.lineIdx+1;
-      if(next>=S.dialogues.length){
-        if(S.loopActive){S.lineIdx=0;_nav();setTimeout(playStep,400);return;}
-        stopAll();toast('Fin de la pièce ✓');return;
+       if(S.reduceListening){
+      const nextMyIdx = S.dialogues.findIndex((d,i)=>i>S.lineIdx && S.myRoles.includes(d.role));
+      const gap = nextMyIdx - S.lineIdx;
+      if(nextMyIdx > 0 && gap > 5){
+        S.lineIdx = Math.max(S.lineIdx, nextMyIdx - 1);
+        _nav();
+        setTimeout(() => { S._playStepLock = false; playStep(); }, 100);
+        return;
       }
-      S.lineIdx=next;_nav();setTimeout(playStep,300);
-    }});
+    }
 
-  } else if(beh==='before'){
-    // Lit ma réplique PUIS pause → ▶ pour avancer
     setHeaderSpeaking(cur.role);
-    TTS.speakRole(cur.text,cur.role,{onend:()=>{
-      resetHeader();
-      _pauseMyTurn(false,'À vous — ▶ pour continuer');
-    }});
+    TTS.speakRole(cur.text, cur.role, {
+      limit: lim,
+      onend: () => {
+        resetHeader();
+        if(!S.isPlaying) {
+          S._playStepLock = false;
+          return;
+        }
+        const next = S.lineIdx + 1;
+        if(next >= S.dialogues.length){
+          if(S.loopActive){
+            S.lineIdx = 0;
+            _nav();
+            if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+            S._playStepTimeout = setTimeout(() => {
+              S._playStepLock = false;
+              playStep();
+            }, 400);
+            return;
+          }
+          stopAll();
+          toast('Fin de la pièce ✓');
+          S._playStepLock = false;
+          return;
+        }
+        S.lineIdx = next;
+        _nav();
+        if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+        S._playStepTimeout = setTimeout(() => {
+          S._playStepLock = false;
+          playStep();
+        }, 300);
+      }
+    });
+    return;
+  }
 
-  } else if(beh==='before_after'){
-    // Lit ma réplique PUIS pause → ▶ relit PUIS avance
+  clearSouffleur();
+  const beh = S.myLineBehavior;
+
+  const afterPlay = () => {
+    resetHeader();
+    if(beh === 'chain'){
+      const next = S.lineIdx + 1;
+      if(next >= S.dialogues.length){
+        if(S.loopActive){
+          S.lineIdx = 0;
+          _nav();
+          if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+          S._playStepTimeout = setTimeout(() => {
+            S._playStepLock = false;
+            playStep();
+          }, 400);
+          return;
+        }
+        stopAll();
+        toast('Fin de la pièce ✓');
+        S._playStepLock = false;
+        return;
+      }
+      S.lineIdx = next;
+      _nav();
+      if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
+      S._playStepTimeout = setTimeout(() => {
+        S._playStepLock = false;
+        playStep();
+      }, 300);
+    } else {
+      const afterPending = (beh === 'after' || beh === 'before_after');
+      _pauseMyTurn(afterPending, 'À vous — ▶ pour continuer');
+      S._playStepLock = false;
+    }
+  };
+
+  if(beh === 'chain'){
     setHeaderSpeaking(cur.role);
-    TTS.speakRole(cur.text,cur.role,{onend:()=>{
-      resetHeader();
-      _pauseMyTurn(true,'À vous — ▶ pour entendre à nouveau');
-    }});
-
-  } else if(beh==='after'){
-    // Pause directe → ▶ lit ma réplique PUIS avance
-    _pauseMyTurn(true,'À vous — ▶ pour entendre après');
-
+    TTS.speakRole(cur.text, cur.role, { onend: afterPlay });
+  } else if(beh === 'before'){
+    setHeaderSpeaking(cur.role);
+    TTS.speakRole(cur.text, cur.role, { onend: afterPlay });
+  } else if(beh === 'before_after'){
+    setHeaderSpeaking(cur.role);
+    TTS.speakRole(cur.text, cur.role, { onend: afterPlay });
+  } else if(beh === 'after'){
+    afterPlay();
   } else {
-    // skip (défaut) : pause directe → ▶ pour avancer
-    _pauseMyTurn(false,'À vous — ▶ pour continuer');
+    afterPlay();
   }
 }
-function setHeaderSpeaking(role){const c=S.play?.roles.find(r=>r.name===role)?.color||'#8A1818';$('play-title-hd').innerHTML=`<span style="color:${c}">${esc(role)}</span><span class="speaking-ind"><span></span><span></span><span></span></span>`;}
-function setHeaderMyTurn(msg){$('play-title-hd').innerHTML=`<span style="color:var(--amber);font-style:italic">${msg}</span>`;}
+
+function setHeaderSpeaking(role){
+  const c = S.play?.roles.find(r=>r.name===role)?.color || '#8A1818';
+  $('play-title-hd').innerHTML = `<span style="color:${c}">${esc(role)}</span><span class="speaking-ind"><span></span><span></span><span></span></span>`;
+}
+
+function setHeaderMyTurn(msg){
+  $('play-title-hd').innerHTML = `<span style="color:var(--amber);font-style:italic">${msg}</span>`;
+}
+
 function resetHeader(){
   if(S.play){
     const hd = $('play-title-hd');
@@ -2762,30 +2860,37 @@ function resetHeader(){
     if(oldSpk) oldSpk.remove();
   }
 }
+
 function hearLine(di){
-  const cur=S.dialogues[di!==undefined?di:S.lineIdx];
-  if(!cur)return;
-  const wasPlaying=S.isPlaying;
-  S.isPlaying=false;
-  TTS.stop();clearSouffleur();
-  const bp=$('bb-play');if(bp){bp.classList.remove('active');bp.textContent='▶';}
+  const cur = S.dialogues[di!==undefined ? di : S.lineIdx];
+  if(!cur) return;
+  const wasPlaying = S.isPlaying;
+  S.isPlaying = false;
+  TTS.stop();
+  clearSouffleur();
+  const fab = $('fab-play');
+  if(fab) { fab.classList.remove('playing'); fab.textContent = '▶'; }
   setHeaderSpeaking(cur.role);
-  TTS.speakRole(cur.text,cur.role,{onend:()=>{
-    resetHeader();
-    if(wasPlaying&&!['lecture','masquer','karaoke'].includes(S.mode)){
-      setHeaderMyTurn('▶ pour continuer');
-      S._myTurnPending=true;
+  TTS.speakRole(cur.text, cur.role, {
+    onend: () => {
+      resetHeader();
+      if(wasPlaying && !['lecture','masquer','karaoke'].includes(S.mode)){
+        setHeaderMyTurn('▶ pour continuer');
+        S._myTurnPending = true;
+      }
     }
-  }});
+  });
 }
+
 // ════ MASQUER / SOUFFLEUR ════
 function revealCurrent(){toggleReveal(S.lineIdx);}
 function revealLine(di){
   S.revealed.add(di);
   const el=$('st-'+di);if(el)el.classList.add('revealed');
 }
-function toggleRevealWord(span,original){
-  // Tap sur un mot caché → révèle le mot ; re-tap → re-cache
+function toggleRevealWord(span){
+  const original = span.dataset.word;
+  if(!original) return;
   if(span.dataset.revealed==='1'){
     span.textContent='_'.repeat(Math.max(2,Math.min(original.length,8)));
     span.dataset.revealed='0';
@@ -2794,6 +2899,7 @@ function toggleRevealWord(span,original){
     span.dataset.revealed='1';
   }
 }
+
 function toggleReveal(di){
   if(S.revealed.has(di)){
     S.revealed.delete(di);
@@ -2804,12 +2910,19 @@ function toggleReveal(di){
   }
 }
 function startSouffleur(){
-  clearSouffleur();const d=parseInt($('souffleur-delay')?.value||5)*1000;
-  S.souffleurT=setTimeout(()=>{
-    const cur=S.dialogues[S.lineIdx];if(!cur)return;
-    const h=$('souffleur-hint');h.textContent=cur.text.split(/\s+/).slice(0,3).join(' ')+'…';h.classList.add('show');
-  },d);
+  clearSouffleur();
+  const d = parseInt($('souffleur-delay')?.value||5)*1000;
+  S.souffleurT = setTimeout(()=>{
+    const cur = S.dialogues[S.lineIdx];
+    if(!cur) return;
+    const h = $('souffleur-hint');
+    if(h) {
+      h.textContent = cur.text.split(/\s+/).slice(0,3).join(' ')+'…';
+      h.classList.add('show');
+    }
+  }, d);
 }
+
 function clearSouffleur(){clearTimeout(S.souffleurT);S.souffleurT=null;$('souffleur-hint').classList.remove('show');}
 function resetSouffleur(){clearSouffleur();if(S._myTurnPending&&S.mode==='souffleur')startSouffleur();}
 
@@ -2992,7 +3105,9 @@ async function toggleRecording(){
     S._recMediaRecorder.ondataavailable=e=>S._recChunks.push(e.data);
     S._recMediaRecorder.onstop=saveRecording;
     S._recMediaRecorder.start();
-    $('bb-rec').classList.add('active');$('rec-indicator').classList.add('show');
+        const recBtn = $('bb-rec');
+    if(recBtn) recBtn.classList.add('active');
+    $('rec-indicator').classList.add('show');
     toast('\u23fa Enregistrement en cours\u2026');
   }catch(e){toast('Micro non accessible: '+e.message);}
 }
@@ -3250,8 +3365,15 @@ $('btn-enreg-back').addEventListener('click',()=>{showScreen(S.play?'play':'libr
 $('btn-partage-back').addEventListener('click',()=>{showScreen(S.play?'play':'library');});
 
 // ════ CACHE AUDIO PERSISTANT ════
+
 async function updateCacheStatus(){
-  const el=$('cache-status');if(!el)return;
+  const el=$('cache-status');
+  if(!el) return;
+  if(!S.play || !S.dialogues){
+    el.textContent = 'Aucune pièce chargée';
+    el.style.color = 'var(--ink-4)';
+    return;
+  }
   const n=await audioCacheCount();
   const total=S.dialogues.length;
   if(n===0){el.textContent='Cache vide';el.style.color='var(--ink-4)';}
@@ -3287,6 +3409,11 @@ async function prechauffer(){
   for(const line of lines){
     const voiceId=S.voiceAssignments[line.role];
     if(!voiceId){skipped++;done++;continue;}
+       if(!voiceId || voiceId.length < 5){
+      skipped++;
+      done++;
+      continue;
+    }
     const cacheKey=voiceId+'||'+line.text;
     // Vérifier si déjà en cache
     const cached=await audioCacheGet(cacheKey);
@@ -5482,7 +5609,12 @@ function _scoreBest(alternatives, reference){
 }
 
 async function _micEvaluate(alternatives, cur){
-  MIC.active=false;
+    if(!alternatives || alternatives.length === 0){
+    toast('Aucune parole détectée, réessaie');
+    stopMicEval();
+    return;
+  }
+MIC.active=false;
   try{ MIC.reco?.abort(); }catch{}
   $('mic-overlay').classList.remove('show');
 
