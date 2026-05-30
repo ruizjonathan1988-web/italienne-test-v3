@@ -4814,11 +4814,12 @@ function _micStartPTT(cur){
     // Si relâché et qu'on a des résultats → évaluer
     if(!_pttActive && MIC.got && MIC._pttAlts.length){
       $('mic-overlay').classList.remove('show');
-      MIC.active=false;
-      _micEvaluate(MIC._pttAlts, MIC._pttCur);
-    } else if(!_pttActive && !MIC.got){
-      toast('Rien capté — parle plus près');
-      stopMicEval();
+     _stopMicTimer();
+MIC.active=false;
+  try{ MIC.reco?.abort(); }catch{}
+  $('mic-overlay').classList.remove('show');
+
+  // Scorer les 3 alternativestopMicEval();
     }
   };
   try{ r.start(); }catch{ stopMicEval(); }
@@ -4867,17 +4868,8 @@ function _startMicTimer(){
   _micTimerT = setTimeout(()=>{
     _stopMicTimer();
     if(!S._myTurnPending) return;
-    if(micAutoAdvance()){
-      // Avance auto
-      S._myTurnPending = false;
-      S._afterPending = false;
-      resetHeader(); clearSouffleur();
-      _advanceAndPlay();
-    } else {
-      // Barre finie, pas d'avance auto : FAB devient ⏭ (suivant)
-      _micTimerExpired = true;
-      updateFabPlay();
-    }
+    _micTimerExpired = true;
+    updateFabPlay();
   }, dur);
 }
 
@@ -5574,6 +5566,7 @@ async function _micEvaluate(alternatives, cur){
     stopMicEval();
     return;
   }
+_stopMicTimer();
 MIC.active=false;
   try{ MIC.reco?.abort(); }catch{}
   $('mic-overlay').classList.remove('show');
@@ -5608,17 +5601,25 @@ function _showMicResult(pct,spoken,cur){
     ${!ok?`<button class="mic-retry" onclick="retryMicEval()">↺ Réessayer</button>`:''}
     <button class="mic-retry" onclick="closeMicResult()" style="background:rgba(244,238,228,.12)">Continuer ›</button>`;
   // Avance auto si réussite
-  if(ok&&micAutoAdvance()){
-    setTimeout(()=>{ closeMicResult(); if(S._myTurnPending){togglePlay();} }, 2500);
+ if(ok&&micAutoAdvance()){
+    clearAutoChainCountdown();
+    MIC._advanceTimer=setTimeout(()=>{
+      closeMicResult();
+      if(S._myTurnPending){ togglePlay(); }
+    }, 2500);
   }
 }
 function retryMicEval(){
   $('mic-result').classList.remove('show');
   startMicEval(_micRetryDi);
 }
-function closeMicResult(){ $('mic-result').classList.remove('show'); }
+function closeMicResult(){
+  $('mic-result').classList.remove('show');
+  if(MIC._advanceTimer){ clearTimeout(MIC._advanceTimer); MIC._advanceTimer=null; }
+}
 function stopMicEval(){
-  MIC.active=false; MIC.got=false;
+_stopMicTimer();
+MIC.active=false;
   try{ MIC.reco?.abort(); }catch{}
   MIC.reco=null;
   $('mic-overlay').classList.remove('show');
