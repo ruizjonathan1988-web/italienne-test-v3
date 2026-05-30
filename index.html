@@ -2108,6 +2108,8 @@ document.body.classList.add('has-tabs');
 closeSidebar();
 $('fab-play').classList.add('show');
 updateFabPlay();
+updateFabPlay
+function updateBottomBar() {}
 // Mettre à jour onglet actif
 ['biblio','texte','marques','reglages'].forEach(t=>{
   $('tab-'+t)?.classList.toggle('active', t==='texte');
@@ -2118,7 +2120,7 @@ if(!S.myRole||S.myRole===S.play.roles[0]?.name){
 }
 const _mb1=$('mode-badge');if(_mb1)_mb1.textContent=MODES.find(m=>m.id===S.mode)?.label.toUpperCase()||'LECTURE';
   $('loop-badge').classList.remove('show');
-  renderSidebar();renderContent();updateBottomBar();updateAutochainUI();
+  renderSidebar();renderContent();updateAutochainUI();
 
   // Charger les données async EN ARRIÈRE-PLAN et re-rendre si nécessaire
   try{
@@ -2206,6 +2208,20 @@ function renderMyLineOpts(){
       <span class="ico">${o.icon}</span><span>${o.label}</span>
     </div>`).join('');
 }
+
+function setMode(m){
+  S.mode = m;
+  stopAll();
+  S.revealed = new Set();
+  saveSettings();
+  const _mb2 = $('mode-badge');
+  if(_mb2) _mb2.textContent = MODES.find(x => x.id === m)?.label.toUpperCase() || m;
+  renderModes();
+  renderContent();
+  $('sb-blanc').style.display = m === 'blanc' ? 'block' : 'none';
+  if(m === 'blanc') updateBlancDisplay();
+}
+
 function renderVoiceAssign(){
   const el=$('voice-assign-list');if(!el||!S.play)return;
    // Voix verrouillées — les MP3 GitHub sont liés aux assignations de DEFAULT_VOICE_ASSIGNMENTS
@@ -2721,112 +2737,57 @@ function _pauseMyTurn(afterPending,msg){
 
 function playStep(){
   if(!S.isPlaying) return;
-  if(S._playStepLock) return;
-  S._playStepLock = true;
-
   const cur = S.dialogues[S.lineIdx];
   if(!cur){
-    if(S.loopActive){
-      S.lineIdx = 0;
-      _nav();
-      setTimeout(() => { S._playStepLock = false; playStep(); }, 400);
-      return;
-    }
-    stopAll();
-    toast('Fin de la pièce ✓');
-    S._playStepLock = false;
-    return;
+    if(S.loopActive){ S.lineIdx = 0; _nav(); setTimeout(playStep,400); return; }
+    stopAll(); toast('Fin de la pièce ✓'); return;
   }
-
   const isMe = isMyLine(cur.role);
   const lim = parseInt($('line-limit')?.value||0);
-    if(!isMe){
-       if(S.reduceListening){
+
+  if(!isMe){
+    if(S.reduceListening){
       const nextMyIdx = S.dialogues.findIndex((d,i)=>i>S.lineIdx && S.myRoles.includes(d.role));
       const gap = nextMyIdx - S.lineIdx;
       if(nextMyIdx > 0 && gap > 5){
         S.lineIdx = Math.max(S.lineIdx, nextMyIdx - 1);
         _nav();
-        setTimeout(() => { S._playStepLock = false; playStep(); }, 100);
+        setTimeout(playStep, 100);
         return;
       }
     }
-
     setHeaderSpeaking(cur.role);
-    TTS.speakRole(cur.text, cur.role, {
-      limit: lim,
-      onend: () => {
-        resetHeader();
-        if(!S.isPlaying) {
-          S._playStepLock = false;
-          return;
-        }
-        const next = S.lineIdx + 1;
-        if(next >= S.dialogues.length){
-          if(S.loopActive){
-            S.lineIdx = 0;
-            _nav();
-            if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
-            S._playStepTimeout = setTimeout(() => {
-              S._playStepLock = false;
-              playStep();
-            }, 400);
-            return;
-          }
-          stopAll();
-          toast('Fin de la pièce ✓');
-          S._playStepLock = false;
-          return;
-        }
-        S.lineIdx = next;
-        _nav();
-        if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
-        S._playStepTimeout = setTimeout(() => {
-          S._playStepLock = false;
-          playStep();
-        }, 300);
+    TTS.speakRole(cur.text, cur.role, {limit: lim, onend: () => {
+      resetHeader();
+      if(!S.isPlaying) return;
+      const next = S.lineIdx + 1;
+      if(next >= S.dialogues.length){
+        if(S.loopActive){ S.lineIdx = 0; _nav(); setTimeout(playStep,400); return; }
+        stopAll(); toast('Fin de la pièce ✓'); return;
       }
-    });
+      S.lineIdx = next; _nav();
+      setTimeout(playStep, 300);
+    }});
     return;
   }
 
   clearSouffleur();
   const beh = S.myLineBehavior;
-
   const afterPlay = () => {
     resetHeader();
     if(beh === 'chain'){
       const next = S.lineIdx + 1;
       if(next >= S.dialogues.length){
-        if(S.loopActive){
-          S.lineIdx = 0;
-          _nav();
-          if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
-          S._playStepTimeout = setTimeout(() => {
-            S._playStepLock = false;
-            playStep();
-          }, 400);
-          return;
-        }
-        stopAll();
-        toast('Fin de la pièce ✓');
-        S._playStepLock = false;
-        return;
+        if(S.loopActive){ S.lineIdx = 0; _nav(); setTimeout(playStep,400); return; }
+        stopAll(); toast('Fin de la pièce ✓'); return;
       }
-      S.lineIdx = next;
-      _nav();
-      if(S._playStepTimeout) clearTimeout(S._playStepTimeout);
-      S._playStepTimeout = setTimeout(() => {
-        S._playStepLock = false;
-        playStep();
-      }, 300);
+      S.lineIdx = next; _nav();
+      setTimeout(playStep, 300);
     } else {
       const afterPending = (beh === 'after' || beh === 'before_after');
       _pauseMyTurn(afterPending, 'À vous — ▶ pour continuer');
-      S._playStepLock = false;
     }
   };
-
   if(beh === 'chain'){
     setHeaderSpeaking(cur.role);
     TTS.speakRole(cur.text, cur.role, { onend: afterPlay });
