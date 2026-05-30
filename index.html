@@ -5344,7 +5344,7 @@ function renderSettingsTab(tab){
         style="font-size:.72rem;padding:.3rem .5rem;margin-bottom:.4rem">
       <div style="display:flex;gap:.35rem;margin-bottom:.4rem">
         <button class="btn primary" style="flex:1;font-size:.68rem;padding:.28rem"
-          onclick="const v=$('hf-key-input')?.value?.trim();if(v){localStorage.setItem('it.hf_key',v);toast('✓ Clé Hugging Face sauvegardée');}else{localStorage.removeItem('it.hf_key');toast('Clé supprimée');}">
+          onclick="const v=$('hf-key-input')?.value?.trim();if(v){localStorage.setItem('it.hf_key',v);toast('✓ Clé Hugging Face sauvegardée');}else{localStorage.removeItem('it.hf_key');toast('Clé supprimée');}renderSettingsTab('technique');">
           ✓ Sauvegarder
         </button>
         <button class="btn" style="font-size:.68rem;padding:.28rem"
@@ -5455,13 +5455,13 @@ function scoreKeywords(spoken, reference){
   return hit/ref.length;
 }
 async function scoreSemantic(spoken, reference){
-  const key=getHFKey(); if(!key)return null;
   try{
-    const r=await fetch('https://api-inference.huggingface.co/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',{
+    const r=await fetch('https://shrill-math-c830.ruiz-jonathan1988.workers.dev',{
       method:'POST',
-      headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({inputs:{source_sentence:reference,sentences:[spoken]}}),
     });
+
     if(!r.ok)return null;
     const data=await r.json();
     if(Array.isArray(data)&&typeof data[0]==='number')return data[0];
