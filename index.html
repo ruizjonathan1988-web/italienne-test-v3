@@ -5444,7 +5444,22 @@ async function scoreSemantic(spoken, reference){
       body:JSON.stringify({inputs:{source_sentence:reference,sentences:[spoken]}}),
     });
 
-    if(!r.ok)return null;
+    if(!r.ok){
+      if(r.status===503){
+        // Modèle en chauffe — on attend 4s et on retente une fois
+        await new Promise(res=>setTimeout(res,4000));
+        const r2=await fetch('https://shrill-math-c830.ruiz-jonathan1988.workers.dev',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({inputs:{source_sentence:reference,sentences:[spoken]}}),
+        });
+        if(!r2.ok)return null;
+        const data2=await r2.json();
+        if(Array.isArray(data2)&&typeof data2[0]==='number')return data2[0];
+        return null;
+      }
+      return null;
+    }
     const data=await r.json();
     if(Array.isArray(data)&&typeof data[0]==='number')return data[0];
     return null;
@@ -5557,15 +5572,16 @@ MIC.active=false;
   const kw=_scoreBest(alternatives, cur.text);
   let final=kw;
   // Sémantique seulement si zone grise et clé présente (sur la 1ère alternative)
-  if(kw>=0.40&&kw<=0.85&&getHFKey()){
-    const sem=await scoreSemantic(alternatives[0], cur.text);
+  let sem=null;
+  if(kw>=0.40&&kw<=0.85){
+    sem=await scoreSemantic(alternatives[0], cur.text);
     if(sem!==null)final=Math.max(kw,sem);
   }
   const pct=Math.round(final*100);
   logSession('reco',final);
-  _showMicResult(pct,alternatives[0],cur);
+  _showMicResult(pct,alternatives[0],cur,Math.round(kw*100),sem!==null?Math.round(sem*100):null);
 }
-function _showMicResult(pct,spoken,cur){
+function _showMicResult(pct,spoken,cur,kwPct=0,semPct=null){
   const el=$('mic-result'); if(!el)return;
   let cls,stars,msg,sound;
   if(pct>=90){ cls='r-perfect';stars='🌟';msg='Bravo, c\'est parfait !';sound='perfect'; }
@@ -5580,6 +5596,9 @@ function _showMicResult(pct,spoken,cur){
     <div class="mic-result-pct">${pct}%</div>
     <div class="mic-result-msg">${msg}</div>
     <div class="mic-result-said">Tu as dit : « ${esc(spoken)} »</div>
+    <div style="font-family:'Courier Prime',monospace;font-size:.6rem;color:rgba(244,238,228,.5);margin-top:.3rem;text-align:center">
+      🔤 mots-clés : ${kwPct}% ${semPct!==null?`· 🧠 sémantique : ${semPct}%`:'· 🧠 sémantique : —'}
+    </div>
     ${!ok?`<button class="mic-retry" onclick="retryMicEval()">↺ Réessayer</button>`:''}
     <button class="mic-retry" onclick="closeMicResult()" style="background:rgba(244,238,228,.12)">Continuer ›</button>`;
   // Avance auto si réussite
