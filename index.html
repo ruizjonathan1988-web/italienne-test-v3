@@ -5334,26 +5334,8 @@ function renderSettingsTab(tab){
       <div id="cache-gh-status2" style="font-family:'Courier Prime',monospace;font-size:.6rem;line-height:1.5"></div>
 
       <div class="settings-section-label">Hugging Face (scoring sémantique)</div>
-      <div style="font-family:'Courier Prime',monospace;font-size:.63rem;color:var(--ink-3);margin-bottom:.35rem;line-height:1.6">
-        Clé optionnelle pour améliorer le scoring micro en zone grise (40–85%).<br>
-        Gratuit sur <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--amber)">huggingface.co</a>
-      </div>
-      <input type="password" id="hf-key-input" class="txt-input"
-        placeholder="hf_…"
-        value="${getHFKey()}"
-        style="font-size:.72rem;padding:.3rem .5rem;margin-bottom:.4rem">
-      <div style="display:flex;gap:.35rem;margin-bottom:.4rem">
-        <button class="btn primary" style="flex:1;font-size:.68rem;padding:.28rem"
-          onclick="const v=$('hf-key-input')?.value?.trim();if(v){localStorage.setItem('it.hf_key',v);toast('✓ Clé Hugging Face sauvegardée');}else{localStorage.removeItem('it.hf_key');toast('Clé supprimée');}renderSettingsTab('technique');">
-          ✓ Sauvegarder
-        </button>
-        <button class="btn" style="font-size:.68rem;padding:.28rem"
-          onclick="localStorage.removeItem('it.hf_key');if($('hf-key-input'))$('hf-key-input').value='';toast('Clé supprimée');">
-          🗑
-        </button>
-      </div>
-      <div style="font-family:'Courier Prime',monospace;font-size:.6rem;color:${getHFKey()?'var(--green)':'var(--ink-4)'}">
-        ${getHFKey()?'✓ Clé présente — scoring sémantique activé':'Aucune clé — scoring par mots-clés uniquement'}
+      <div style="font-family:'Courier Prime',monospace;font-size:.65rem;color:var(--green)">
+        ✓ Scoring sémantique actif via proxy sécurisé
       </div>
 
       <div class="settings-section-label">Voix par personnage</div>
